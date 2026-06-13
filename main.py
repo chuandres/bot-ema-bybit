@@ -7,7 +7,7 @@ API_KEY = os.getenv('BYBIT_API_KEY')
 API_SECRET = os.getenv('BYBIT_API_SECRET')
 SYMBOL = 'ETH/USDT:USDT'
 TIMEFRAME = '4h'
-QTY = 0.002
+QTY = 0.002  # 0.002 ETH = ~$7. Ajusta según tu saldo
 LEVERAGE = 5
 STOP_LOSS_PCT = 0.03
 
@@ -100,3 +100,8 @@ def main():
             else:
                 print("Sin cruce ETH. Esperando...")
         except Exception as e:
+            print(f"Error: {e}")
+        time.sleep(3600)
+
+if __name__ == "__main__":
+    main()
