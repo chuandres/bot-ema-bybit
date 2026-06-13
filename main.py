@@ -6,18 +6,18 @@ from datetime import datetime
 
 API_KEY = os.getenv('BYBIT_API_KEY')
 API_SECRET = os.getenv('BYBIT_API_SECRET')
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN') # Opcional: para avisos
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN') # Opcional
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID') # Opcional
 
-SYMBOL = 'ADA/USDT:USDT' # CAMBIO 1: ADA sí abre con $10
+SYMBOL = 'ADA/USDT:USDT'
 TIMEFRAME = '4h'
-QTY = 10 # CAMBIO 2: 10 ADA = ~$3.5. Mínimo de Bybit
-LEVERAGE = 2 # CAMBIO 3: 5x te mata. 2x aguantas 17 SL
-STOP_LOSS_PCT = 0.02 # CAMBIO 4: 2% = -4% con 2x. Antes era -15%
-TAKE_PROFIT_PCT = 0.04 # NUEVO: TP 2:1. Sin esto nunca eres rentable
-ADX_MIN = 25 # NUEVO: Solo opera si hay tendencia
-EMA_TREND = 200 # NUEVO: Filtro macro
-MAX_LOSS_STREAK = 3 # NUEVO: Si pierdes 3 seguidas, para 48h
+QTY = 10 # 10 ADA = ~$3.5. Bybit mínimo para ADA
+LEVERAGE = 2 # 5x te liquida con $10
+STOP_LOSS_PCT = 0.02 # 2% = -4% con 2x
+TAKE_PROFIT_PCT = 0.04 # 4% = +8% con 2x. Ratio 2:1
+ADX_MIN = 25 # Filtro: solo opera si ADX > 25
+EMA_TREND = 200 # Filtro: solo long si price > EMA200
+MAX_LOSS_STREAK = 3 # Anti-ruina: 3 SL seguidos = pausa 48h
 
 exchange = ccxt.bybit({
     'apiKey': API_KEY,
@@ -32,15 +32,15 @@ def telegram(msg):
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-            requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
+            requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=5)
         except: pass
-    print(msg) # Siempre imprime en logs de Railway
+    print(msg)
 
 def set_leverage():
     try:
         exchange.set_leverage(LEVERAGE, SYMBOL, params={'category': 'linear'})
         exchange.set_margin_mode('isolated', SYMBOL, params={'category': 'linear'})
-        telegram(f"✅ Bot iniciado | ADA 2x | SL: -4% | TP: +8%")
+        telegram(f"✅ Bot iniciado | ADA {LEVERAGE}x | SL: -{STOP_LOSS_PCT*LEVERAGE*100:.0f}% | TP: +{TAKE_PROFIT_PCT*LEVERAGE*100:.0f}%")
     except Exception as e:
         if '110043' not in str(e) and '110013' not in str(e):
             telegram(f"⚠️ Error config: {e}")
@@ -63,7 +63,7 @@ def get_indicadores():
         ema21 = calc_ema(closes, 21)
         ema200 = calc_ema(closes, 200)
 
-        # ADX simplificado
+        # ADX
         tr = [max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1])) for i in range(1, len(highs))]
         plus_dm = [highs[i] - highs[i-1] if highs[i] - highs[i-1] > lows[i-1] - lows[i] and highs[i] - highs[i-1] > 0 else 0 for i in range(1, len(highs))]
         minus_dm = [lows[i-1] - lows[i] if lows[i-1] - lows[i] > highs[i] - highs[i-1] and lows[i-1] - lows[i] > 0 else 0 for i in range(1, len(lows))]
@@ -92,7 +92,6 @@ def cancelar_ordenes():
     except: pass
 
 def open_position(side, current_price):
-    global loss_streak
     try:
         cancelar_ordenes()
         exchange.create_order(SYMBOL, 'market', 'buy' if side == 'long' else 'sell', QTY, params={'category': 'linear'})
@@ -107,18 +106,17 @@ def open_position(side, current_price):
             tp_price = round(current_price * (1 - TAKE_PROFIT_PCT), 4)
             sl_side, trigger_direction = 'buy', 1
 
-        # Stop Loss - SÍ TE LO PONE AUTOMÁTICO
+        # Stop Loss - SÍ SE PONE AUTOMÁTICO
         exchange.create_order(SYMBOL, 'stop_market', sl_side, QTY, params={
             'triggerPrice': sl_price, 'triggerDirection': trigger_direction,
             'reduceOnly': True, 'category': 'linear', 'triggerBy': 'LastPrice'
         })
-        # Take Profit - TAMBIÉN TE LO PONE AUTOMÁTICO
+        # Take Profit - TAMBIÉN SE PONE AUTOMÁTICO
         exchange.create_order(SYMBOL, 'limit', sl_side, QTY, params={
             'price': tp_price, 'reduceOnly': True, 'category': 'linear'
         })
 
-        telegram(f"📈 LONG ADA" if side == 'long' else f"📉 SHORT ADA")
-        telegram(f"Entrada: ${current_price:.4f}\nSL: ${sl_price:.4f} | TP: ${tp_price:.4f}")
+        telegram(f"📈 {side.upper()} ADA abierto\nEntrada: ${current_price:.4f}\nSL: ${sl_price:.4f} | TP: ${tp_price:.4f}")
     except Exception as e:
         telegram(f"⚠️ Error abriendo: {e}")
 
@@ -127,7 +125,6 @@ def main():
     set_leverage()
     while True:
         try:
-            # Anti-ruina: 3 SL seguidos = pausa 48h
             if loss_streak >= MAX_LOSS_STREAK:
                 telegram(f"🛑 Pausa 48h por {MAX_LOSS_STREAK} SL seguidos")
                 time.sleep(172800)
@@ -138,16 +135,31 @@ def main():
             if ema9 is None: time.sleep(60); continue
 
             position_side, _ = get_position()
-            print(f"{datetime.now().strftime('%H:%M')} | ADA: {price:.4f} | ADX:{adx} | Pos:{position_side} | SL seguidos:{loss_streak}")
 
-            # NUEVA LÓGICA: Solo entra si hay tendencia real
+            # LOG COMPLETO PARA QUE VEAS POR QUÉ NO ENTRA
+            log_msg = f"{datetime.now().strftime('%H:%M')} | ADA: {price:.4f} | EMA9:{ema9:.4f} | EMA21:{ema21:.4f} | EMA200:{ema200:.4f} | ADX:{adx} | Pos:{position_side}"
+            print(log_msg)
+
             cond_long = ema9 > ema21 and price > ema200 and adx > ADX_MIN
             cond_short = ema9 < ema21 and price < ema200 and adx > ADX_MIN
+
+            # TE DICE EXACTO POR QUÉ NO ENTRA
+            if position_side is None:
+                if adx <= ADX_MIN:
+                    print("❌ Sin señal: ADX <= 25. Mercado lateral, no opera")
+                elif ema9 > ema21 and price <= ema200:
+                    print("❌ Sin señal: Precio debajo de EMA200. Tendencia macro bajista")
+                elif ema9 < ema21 and price >= ema200:
+                    print("❌ Sin señal: Precio arriba de EMA200 pero EMA9 < EMA21")
+                elif ema9 <= ema21 and ema9 >= ema21:
+                    print("❌ Sin señal: EMAs pegadas. Esperando cruce")
+                else:
+                    print("❌ Sin señal: No cumple condiciones")
 
             if cond_long and position_side!= 'long':
                 if position_side == 'short':
                     exchange.create_order(SYMBOL, 'market', 'buy', QTY, params={'reduceOnly': True, 'category': 'linear'})
-                    loss_streak += 1 # Si cierra por cruce, cuenta como loss
+                    loss_streak += 1
                     time.sleep(2)
                 open_position('long', price)
 
@@ -159,7 +171,7 @@ def main():
                 open_position('short', price)
 
         except Exception as e:
-            telegram(f"⚠️ Error: {e}")
+            telegram(f"⚠️ Error loop: {e}")
         time.sleep(3600) # Revisa cada 1h
 
 if __name__ == "__main__":
