@@ -75,19 +75,18 @@ def open_position(side, current_price):
             SYMBOL, 'market', 'buy' if side == 'long' else 'sell', QTY,
             params={'category': 'linear'}
         )
-        time.sleep(2) # Esperar que Bybit registre la posición
+        time.sleep(2)
         
-        # 2. Poner Stop Loss como orden condicional
+        # 2. Poner Stop Loss como orden condicional V5
         if side == 'long':
-            sl_price = round(current_price * (1 - STOP_LOSS_PCT), 2) # SL ABAJO
+            sl_price = round(current_price * (1 - STOP_LOSS_PCT), 2)
             sl_side = 'sell'
-            trigger_direction = 2 # 2 = below
+            trigger_direction = 2 # below
         else: # short
-            sl_price = round(current_price * (1 + STOP_LOSS_PCT), 2) # SL ARRIBA
+            sl_price = round(current_price * (1 + STOP_LOSS_PCT), 2)
             sl_side = 'buy'
-            trigger_direction = 1 # 1 = above
+            trigger_direction = 1 # above
         
-        # Orden stop_market V5
         exchange.create_order(
             SYMBOL, 'stop_market', sl_side, QTY,
             params={
@@ -130,7 +129,7 @@ def main():
                 print("Sin cruce ETH. Esperando...")
         except Exception as e:
             print(f"Error: {e}")
-        time.sleep(3600) # Revisa cada 1 hora = 1 vela de 4h
+        time.sleep(3600)
 
 if __name__ == "__main__":
     main()
