@@ -7,7 +7,7 @@ API_KEY = os.getenv('BYBIT_API_KEY')
 API_SECRET = os.getenv('BYBIT_API_SECRET')
 SYMBOL = 'ETH/USDT:USDT'
 TIMEFRAME = '4h'
-QTY = 0.01 # Mínimo de Bybit para ETH
+QTY = 0.01
 LEVERAGE = 5
 STOP_LOSS_PCT = 0.03
 
@@ -47,7 +47,7 @@ def get_emas():
 def get_position():
     try:
         positions = exchange.fetch_positions([SYMBOL])
-        for pos in positions: # AQUÍ ESTABA EL ERROR - FALTABA EL :
+        for pos in positions:
             if pos['symbol'] == SYMBOL and float(pos['contracts']) > 0:
                 return pos['side'], float(pos['contracts'])
         return None, 0
@@ -64,13 +64,17 @@ def close_position(side):
 
 def open_position(side, current_price):
     try:
-        exchange.create_order(SYMBOL, 'market', 'buy' if side == 'long' else 'sell', QTY)
+        # 1. Abre la posición
+        order = exchange.create_order(SYMBOL, 'market', 'buy' if side == 'long' else 'sell', QTY)
+        
+        # 2. Pon Stop Loss CORRECTO según el lado
         if side == 'long':
-            sl_price = round(current_price * (1 - STOP_LOSS_PCT), 2)
-            exchange.create_order(SYMBOL, 'market', 'sell', QTY, params={'stopLoss': sl_price, 'reduceOnly': True})
-        else:
-            sl_price = round(current_price * (1 + STOP_LOSS_PCT), 2)
-            exchange.create_order(SYMBOL, 'market', 'buy', QTY, params={'stopLoss': sl_price, 'reduceOnly': True})
+            sl_price = round(current_price * (1 - STOP_LOSS_PCT), 2) # SL ABAJO para LONG
+            exchange.create_order(SYMBOL, 'market', 'sell', QTY, params={'stopLoss': sl_price, 'reduceOnly': True, 'triggerBy': 'LastPrice'})
+        else: # short
+            sl_price = round(current_price * (1 + STOP_LOSS_PCT), 2) # SL ARRIBA para SHORT
+            exchange.create_order(SYMBOL, 'market', 'buy', QTY, params={'stopLoss': sl_price, 'reduceOnly': True, 'triggerBy': 'LastPrice'})
+            
         print(f"Posición {side.upper()} ETH abierta: {QTY} | Stop Loss: {sl_price}")
     except Exception as e:
         print(f"Error abriendo: {e}")
