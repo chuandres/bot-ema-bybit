@@ -5,7 +5,7 @@ from datetime import datetime
 
 API_KEY = os.getenv('BYBIT_API_KEY')
 API_SECRET = os.getenv('BYBIT_API_SECRET')
-SYMBOL = 'BTCUSDT' # Sin :USDT pa que use el símbolo correcto
+SYMBOL = 'BTCUSDT' # Para unified se usa así, sin / ni :USDT
 TIMEFRAME = '4h'
 QTY = 0.001
 
@@ -14,14 +14,15 @@ exchange = ccxt.bybit({
     'secret': API_SECRET,
     'enableRateLimit': True,
     'options': {
-        'defaultType': 'unified', # USA CUENTA UNIFIED
+        'defaultType': 'swap', # SWAP = futuros USDT en unified
     },
 })
 exchange.set_sandbox_mode(True)
 
 def get_emas():
     try:
-        ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=100)
+        # Para unified hay que pasar category='linear' explícito
+        ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=100, params={'category': 'linear'})
         closes = [x[4] for x in ohlcv]
         
         ema9 = closes[0]
@@ -41,7 +42,7 @@ def get_emas():
 
 def get_position():
     try:
-        positions = exchange.fetch_positions([SYMBOL])
+        positions = exchange.fetch_positions([SYMBOL], params={'category': 'linear'})
         for pos in positions:
             if pos['symbol'] == SYMBOL and float(pos['contracts']) > 0:
                 return pos['side'], float(pos['contracts'])
@@ -53,7 +54,7 @@ def get_position():
 def close_position(side):
     try:
         close_side = 'sell' if side == 'long' else 'buy'
-        exchange.create_order(SYMBOL, 'market', close_side, QTY, params={'reduceOnly': True})
+        exchange.create_order(SYMBOL, 'market', close_side, QTY, params={'category': 'linear', 'reduceOnly': True})
         print(f"Posición {side} cerrada")
     except Exception as e:
         print(f"Error cerrando: {e}")
@@ -61,7 +62,7 @@ def close_position(side):
 def open_position(side):
     try:
         order_side = 'buy' if side == 'long' else 'sell'
-        exchange.create_order(SYMBOL, 'market', order_side, QTY)
+        exchange.create_order(SYMBOL, 'market', order_side, QTY, params={'category': 'linear'})
         print(f"Posición {side.upper()} abierta: {QTY} BTC")
     except Exception as e:
         print(f"Error abriendo: {e}")
