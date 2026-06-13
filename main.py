@@ -23,12 +23,11 @@ exchange = ccxt.bybit({
 
 def set_leverage():
     try:
-        # Bybit V5 necesita category y symbol en params
         exchange.set_leverage(LEVERAGE, SYMBOL, params={'category': 'linear'})
         exchange.set_margin_mode('isolated', SYMBOL, params={'category': 'linear'})
         print(f"Apalancamiento {LEVERAGE}x | Margen Isolada configurado")
     except Exception as e:
-        if '110043' not in str(e) and '110013' not in str(e): # 110013 = leverage not modified
+        if '110043' not in str(e) and '110013' not in str(e):
             print(f"Error config: {e}")
 
 def get_emas():
@@ -76,24 +75,28 @@ def open_position(side, current_price):
             SYMBOL, 'market', 'buy' if side == 'long' else 'sell', QTY,
             params={'category': 'linear'}
         )
-        time.sleep(1) # Dar tiempo a que se ejecute
+        time.sleep(2) # Esperar que Bybit registre la posición
         
-        # 2. Poner Stop Loss como orden condicional separada
+        # 2. Poner Stop Loss como orden condicional
         if side == 'long':
-            sl_price = round(current_price * (1 - STOP_LOSS_PCT), 2) # SL ABAJO para LONG
+            sl_price = round(current_price * (1 - STOP_LOSS_PCT), 2) # SL ABAJO
             sl_side = 'sell'
+            trigger_direction = 2 # 2 = below
         else: # short
-            sl_price = round(current_price * (1 + STOP_LOSS_PCT), 2) # SL ARRIBA para SHORT
+            sl_price = round(current_price * (1 + STOP_LOSS_PCT), 2) # SL ARRIBA
             sl_side = 'buy'
+            trigger_direction = 1 # 1 = above
         
-        # Orden stop_market para V5
+        # Orden stop_market V5
         exchange.create_order(
             SYMBOL, 'stop_market', sl_side, QTY,
             params={
                 'triggerPrice': sl_price,
+                'triggerDirection': trigger_direction,
                 'reduceOnly': True,
                 'category': 'linear',
-                'positionIdx': 0 # 0 = one-way mode
+                'positionIdx': 0,
+                'triggerBy': 'LastPrice'
             }
         )
             
@@ -127,7 +130,7 @@ def main():
                 print("Sin cruce ETH. Esperando...")
         except Exception as e:
             print(f"Error: {e}")
-        time.sleep(3600) # 1 hora
+        time.sleep(3600) # Revisa cada 1 hora = 1 vela de 4h
 
 if __name__ == "__main__":
     main()
