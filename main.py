@@ -15,16 +15,20 @@ exchange = ccxt.bybit({
     'apiKey': API_KEY,
     'secret': API_SECRET,
     'enableRateLimit': True,
-    'options': {'defaultType': 'linear'},
+    'options': {
+        'defaultType': 'linear',
+        'adjustForTimeDifference': True,
+    },
 })
 
 def set_leverage():
     try:
-        exchange.set_leverage(LEVERAGE, SYMBOL)
-        exchange.set_margin_mode('isolated', SYMBOL)
+        # Bybit V5 necesita category y symbol en params
+        exchange.set_leverage(LEVERAGE, SYMBOL, params={'category': 'linear'})
+        exchange.set_margin_mode('isolated', SYMBOL, params={'category': 'linear'})
         print(f"Apalancamiento {LEVERAGE}x | Margen Isolada configurado")
     except Exception as e:
-        if '110043' not in str(e):
+        if '110043' not in str(e) and '110013' not in str(e): # 110013 = leverage not modified
             print(f"Error config: {e}")
 
 def get_emas():
@@ -46,7 +50,7 @@ def get_emas():
 
 def get_position():
     try:
-        positions = exchange.fetch_positions([SYMBOL])
+        positions = exchange.fetch_positions([SYMBOL], params={'category': 'linear'})
         for pos in positions:
             if pos['symbol'] == SYMBOL and float(pos['contracts']) > 0:
                 return pos['side'], float(pos['contracts'])
@@ -57,23 +61,41 @@ def get_position():
 
 def close_position(side):
     try:
-        exchange.create_order(SYMBOL, 'market', 'sell' if side == 'long' else 'buy', QTY, params={'reduceOnly': True})
+        exchange.create_order(
+            SYMBOL, 'market', 'sell' if side == 'long' else 'buy', QTY, 
+            params={'reduceOnly': True, 'category': 'linear'}
+        )
         print(f"Posición {side} ETH cerrada")
     except Exception as e:
         print(f"Error cerrando: {e}")
 
 def open_position(side, current_price):
     try:
-        # 1. Abre la posición
-        order = exchange.create_order(SYMBOL, 'market', 'buy' if side == 'long' else 'sell', QTY)
+        # 1. Abre la posición market
+        order = exchange.create_order(
+            SYMBOL, 'market', 'buy' if side == 'long' else 'sell', QTY,
+            params={'category': 'linear'}
+        )
+        time.sleep(1) # Dar tiempo a que se ejecute
         
-        # 2. Pon Stop Loss CORRECTO según el lado
+        # 2. Poner Stop Loss como orden condicional separada
         if side == 'long':
             sl_price = round(current_price * (1 - STOP_LOSS_PCT), 2) # SL ABAJO para LONG
-            exchange.create_order(SYMBOL, 'market', 'sell', QTY, params={'stopLoss': sl_price, 'reduceOnly': True, 'triggerBy': 'LastPrice'})
+            sl_side = 'sell'
         else: # short
             sl_price = round(current_price * (1 + STOP_LOSS_PCT), 2) # SL ARRIBA para SHORT
-            exchange.create_order(SYMBOL, 'market', 'buy', QTY, params={'stopLoss': sl_price, 'reduceOnly': True, 'triggerBy': 'LastPrice'})
+            sl_side = 'buy'
+        
+        # Orden stop_market para V5
+        exchange.create_order(
+            SYMBOL, 'stop_market', sl_side, QTY,
+            params={
+                'triggerPrice': sl_price,
+                'reduceOnly': True,
+                'category': 'linear',
+                'positionIdx': 0 # 0 = one-way mode
+            }
+        )
             
         print(f"Posición {side.upper()} ETH abierta: {QTY} | Stop Loss: {sl_price}")
     except Exception as e:
@@ -105,7 +127,7 @@ def main():
                 print("Sin cruce ETH. Esperando...")
         except Exception as e:
             print(f"Error: {e}")
-        time.sleep(3600)
+        time.sleep(3600) # 1 hora
 
 if __name__ == "__main__":
     main()
