@@ -9,14 +9,14 @@ import requests
 # === CONFIG BYBIT ===
 API_KEY = os.getenv('BYBIT_API_KEY')
 API_SECRET = os.getenv('BYBIT_API_SECRET')
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN') # Opcional
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID') # Opcional
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 # === CONFIG FRANCOTIRADOR DOGE ===
 SYMBOL = 'DOGEUSDT'
 TIMEFRAME = '1m'
 QTY = 3000 # DOGE fijo por trade
-LEVERAGE = 10
+LEVERAGE = 75
 RISK_USD = 1 # Stop Loss $1
 REWARD_USD = 2 # Take Profit $2
 
@@ -122,12 +122,12 @@ def calc_indicators(df):
     return df
 
 def check_signal(df):
-    i = len(df) - 1
-    if i < 200: return None
+    i = len(df) - 2 # PENULTIMA VELA CERRADA - así no espera 1min
+    if i < 200: return None, 0, 0
     
     row = df.iloc[i]
     
-    # === FILTROS SOLO SCORE - SIN TENDENCIA ===
+    # === FILTROS ===
     f_rsiLong = row['rsi'] < rsiLongMax
     f_rsiShort = row['rsi'] > rsiShortMin
     f_bbLong = row['low'] <= row['bbLower']
@@ -143,25 +143,31 @@ def check_signal(df):
     scoreLong = sum([f_rsiLong, f_bbLong, f_pivotLong, f_vol, f_wickLong, f_candleLong])
     scoreShort = sum([f_rsiShort, f_bbShort, f_pivotShort, f_vol, f_wickShort, f_candleShort])
     
-    # === ENTRA CON CADA TRIANGULITO L5/L6 o S5/S6 ===
-    longSignal = scoreLong >= 5
-    shortSignal = scoreShort >= 5
+    # === LOG PARA DEBUG ===
+    print(f"Vela: {datetime.fromtimestamp(row['timestamp']/1000)} | Close: {row['close']:.5f} | L:{scoreLong}/6 S:{scoreShort}/6")
     
-    if longSignal: 
-        print(f"TRIANGULO VERDE DETECTADO - Score L: {scoreLong} | Precio: {row['close']:.5f}")
-        return 'long', row['close'], row['atr']
-    if shortSignal: 
-        print(f"TRIANGULO ROJO DETECTADO - Score S: {scoreShort} | Precio: {row['close']:.5f}")
-        return 'short', row['close'], row['atr']
-    return None
+    # === ENTRA CON TRIANGULITO ===
+    if scoreLong >= 5:
+        print(f"✅ TRIANGULO VERDE L{scoreLong} DETECTADO - ENTRANDO LONG")
+        return 'long', df.iloc[-1]['close'], row['atr'] # Usa precio actual para entrar
+    if scoreShort >= 5:
+        print(f"✅ TRIANGULO ROJO S{scoreShort} DETECTADO - ENTRANDO SHORT")
+        return 'short', df.iloc[-1]['close'], row['atr']
+    
+    return None, scoreLong, scoreShort
 
 def set_leverage():
     try:
-        exchange.set_leverage(LEVERAGE, SYMBOL)
         exchange.set_margin_mode('isolated', SYMBOL)
+        exchange.set_leverage(LEVERAGE, SYMBOL)
         print(f"Leverage {LEVERAGE}x seteado en {SYMBOL}")
-    except Exception as e:
-        print(f"Leverage error: {e}")
+    except ccxt.ExchangeError as e:
+        if '110043' in str(e) or 'leverage not modified' in str(e):
+            print(f"Leverage ya estaba en {LEVERAGE}x - OK")
+        elif '110025' in str(e):
+            print(f"Error: Tenés una posición abierta. Cerrala para cambiar leverage")
+        else:
+            print(f"Leverage error: {e}")
 
 def get_position():
     try:
@@ -178,7 +184,7 @@ def place_order(signal, price, atr):
     try:
         side = 'buy' if signal == 'long' else 'sell'
         
-        # Calcular SL y TP por USD fijo
+        # SL y TP por USD fijo
         sl_distance = RISK_USD / QTY
         tp_distance = REWARD_USD / QTY
         
@@ -194,6 +200,8 @@ def place_order(signal, price, atr):
             'takeProfit': tp_price,
         }
         
+        print(f"EJECUTANDO ORDEN: {side.upper()} {QTY} DOGE @ {price:.5f} | SL: {sl_price:.5f} | TP: {tp_price:.5f}")
+        
         order = exchange.create_order(SYMBOL, 'market', side, QTY, None, params)
         
         msg = f"🚀 {signal.upper()} DOGE\nEntrada: {price:.5f}\nSL: {sl_price:.5f} (-${RISK_USD})\nTP: {tp_price:.5f} (+${REWARD_USD})\nQty: {QTY}"
@@ -202,29 +210,33 @@ def place_order(signal, price, atr):
         return order
         
     except Exception as e:
-        print(f"Error orden: {e}")
+        print(f"❌ ERROR ORDEN: {e}")
         send_telegram(f"❌ Error orden: {e}")
         return None
 
 def main():
-    print("Francotirador DOGE Bot iniciado - MODO TRIANGULITOS")
-    send_telegram("🤖 Bot Francotirador DOGE iniciado - MODO TRIANGULITOS")
+    print("Francotirador DOGE Bot iniciado - MODO TRIANGULITOS 75x")
+    send_telegram("🤖 Bot Francotirador DOGE iniciado - 75x - MODO TRIANGULITOS")
     set_leverage()
     
     while True:
         try:
-            if get_position() is None:
+            pos = get_position()
+            if pos is None:
                 df = get_ohlcv()
                 if df is not None:
                     df = calc_indicators(df)
-                    signal_data = check_signal(df)
+                    signal, scoreL, scoreS = check_signal(df)
                     
-                    if signal_data:
-                        signal, price, atr = signal_data
-                        place_order(signal, price, atr)
-                        time.sleep(60)
+                    if signal:
+                        place_order(signal, df.iloc[-1]['close'], df.iloc[-2]['atr'])
+                        time.sleep(60) # Espera 1min después de entrar
+                    else:
+                        print(f"Sin señal. Score actual L:{scoreL} S:{scoreS}")
+            else:
+                print(f"Posición abierta: {pos['side']} {pos['contracts']} DOGE | PNL: {pos['unrealizedPnl']}")
             
-            time.sleep(10)
+            time.sleep(5) # Check cada 5s
             
         except Exception as e:
             print(f"Error main loop: {e}")
