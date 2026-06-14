@@ -13,10 +13,10 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN') # Opcional
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID') # Opcional
 
 # === CONFIG FRANCOTIRADOR DOGE ===
-SYMBOL = 'DOGEUSDT' # Para CCXT se usa sin.P
+SYMBOL = 'DOGEUSDT'
 TIMEFRAME = '1m'
 QTY = 3000 # DOGE fijo por trade
-LEVERAGE = 10 # Ajustalo a tu riesgo
+LEVERAGE = 10
 RISK_USD = 1 # Stop Loss $1
 REWARD_USD = 2 # Take Profit $2
 
@@ -34,7 +34,7 @@ ema21Len = 21
 ema50Len = 50
 ema200Len = 200
 adxLen = 14
-adxTrendMin = 25 # Subido para filtrar lateral en 1min
+adxTrendMin = 25
 atrLen = 14
 
 # === SETUP EXCHANGE ===
@@ -43,7 +43,7 @@ exchange = ccxt.bybit({
     'secret': API_SECRET,
     'enableRateLimit': True,
     'options': {
-        'defaultType': 'swap', # Para Perpetuos USDT
+        'defaultType': 'swap',
     }
 })
 
@@ -53,8 +53,8 @@ def send_telegram(msg):
         data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
         try:
             requests.post(url, data=data)
-        except:
-            pass
+        except Exception as e:
+            print(f"Error Telegram: {e}")
 
 def get_ohlcv():
     try:
@@ -122,16 +122,12 @@ def calc_indicators(df):
     return df
 
 def check_signal(df):
-    i = len(df) - 1 # Última vela cerrada
+    i = len(df) - 1
     if i < 200: return None
     
     row = df.iloc[i]
     
-    # Estado de mercado
-    bullTrend = row['ema9'] > row['ema21'] and row['ema21'] > row['ema50'] and row['ema50'] > row['ema200'] and row['adx'] > adxTrendMin
-    bearTrend = row['ema9'] < row['ema21'] and row['ema21'] < row['ema50'] and row['ema50'] < row['ema200'] and row['adx'] > adxTrendMin
-    
-    # Filtros
+    # === FILTROS SOLO SCORE - SIN TENDENCIA ===
     f_rsiLong = row['rsi'] < rsiLongMax
     f_rsiShort = row['rsi'] > rsiShortMin
     f_bbLong = row['low'] <= row['bbLower']
@@ -147,17 +143,23 @@ def check_signal(df):
     scoreLong = sum([f_rsiLong, f_bbLong, f_pivotLong, f_vol, f_wickLong, f_candleLong])
     scoreShort = sum([f_rsiShort, f_bbShort, f_pivotShort, f_vol, f_wickShort, f_candleShort])
     
-    longSignal = scoreLong >= 5 and bullTrend
-    shortSignal = scoreShort >= 5 and bearTrend
+    # === ENTRA CON CADA TRIANGULITO L5/L6 o S5/S6 ===
+    longSignal = scoreLong >= 5
+    shortSignal = scoreShort >= 5
     
-    if longSignal: return 'long', row['close'], row['atr']
-    if shortSignal: return 'short', row['close'], row['atr']
+    if longSignal: 
+        print(f"TRIANGULO VERDE DETECTADO - Score L: {scoreLong} | Precio: {row['close']:.5f}")
+        return 'long', row['close'], row['atr']
+    if shortSignal: 
+        print(f"TRIANGULO ROJO DETECTADO - Score S: {scoreShort} | Precio: {row['close']:.5f}")
+        return 'short', row['close'], row['atr']
     return None
 
 def set_leverage():
     try:
         exchange.set_leverage(LEVERAGE, SYMBOL)
         exchange.set_margin_mode('isolated', SYMBOL)
+        print(f"Leverage {LEVERAGE}x seteado en {SYMBOL}")
     except Exception as e:
         print(f"Leverage error: {e}")
 
@@ -168,7 +170,8 @@ def get_position():
             if pos['symbol'] == SYMBOL and float(pos['contracts'])!= 0:
                 return pos
         return None
-    except:
+    except Exception as e:
+        print(f"Error get_position: {e}")
         return None
 
 def place_order(signal, price, atr):
@@ -176,7 +179,6 @@ def place_order(signal, price, atr):
         side = 'buy' if signal == 'long' else 'sell'
         
         # Calcular SL y TP por USD fijo
-        tick_size = 0.00001 # DOGE tick
         sl_distance = RISK_USD / QTY
         tp_distance = REWARD_USD / QTY
         
@@ -187,7 +189,6 @@ def place_order(signal, price, atr):
             sl_price = round(price + sl_distance, 5)
             tp_price = round(price - tp_distance, 5)
         
-        # Orden Market con SL/TP
         params = {
             'stopLoss': sl_price,
             'takeProfit': tp_price,
@@ -195,7 +196,7 @@ def place_order(signal, price, atr):
         
         order = exchange.create_order(SYMBOL, 'market', side, QTY, None, params)
         
-        msg = f"🚀 {signal.upper()} DOGE\nEntrada: {price}\nSL: {sl_price} (-${RISK_USD})\nTP: {tp_price} (+${REWARD_USD})\nQty: {QTY}"
+        msg = f"🚀 {signal.upper()} DOGE\nEntrada: {price:.5f}\nSL: {sl_price:.5f} (-${RISK_USD})\nTP: {tp_price:.5f} (+${REWARD_USD})\nQty: {QTY}"
         print(msg)
         send_telegram(msg)
         return order
@@ -206,13 +207,12 @@ def place_order(signal, price, atr):
         return None
 
 def main():
-    print("Francotirador DOGE Bot iniciado...")
-    send_telegram("🤖 Bot Francotirador DOGE iniciado")
+    print("Francotirador DOGE Bot iniciado - MODO TRIANGULITOS")
+    send_telegram("🤖 Bot Francotirador DOGE iniciado - MODO TRIANGULITOS")
     set_leverage()
     
     while True:
         try:
-            # Solo opera si no hay posición abierta
             if get_position() is None:
                 df = get_ohlcv()
                 if df is not None:
@@ -222,9 +222,9 @@ def main():
                     if signal_data:
                         signal, price, atr = signal_data
                         place_order(signal, price, atr)
-                        time.sleep(60) # Esperar 1min después de entrar
+                        time.sleep(60)
             
-            time.sleep(10) # Check cada 10s
+            time.sleep(10)
             
         except Exception as e:
             print(f"Error main loop: {e}")
