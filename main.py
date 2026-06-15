@@ -15,13 +15,13 @@ TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 # === CONFIG FRANCOTIRADOR DOGE ===
 SYMBOL = 'DOGEUSDT'
 TIMEFRAME = '1m'
-QTY = 3000 # DOGE fijo por trade
+QTY = 3000
 LEVERAGE = 75
-RISK_USD = 1 # Stop Loss $1
-REWARD_USD = 2 # Take Profit $2
+RISK_USD = 1
+REWARD_USD = 2
 
 # === INPUTS DEL INDICADOR ===
-pivotLen = 10
+pivotLen = 10 # 10 velas a cada lado para confirmar pivot
 bbLen = 20
 bbMult = 2.5
 rsiLen = 14
@@ -47,200 +47,165 @@ exchange = ccxt.bybit({
     }
 })
 
-def send_telegram(msg):
-    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
-        try:
-            requests.post(url, data=data)
-        except Exception as e:
-            print(f"Error Telegram: {e}")
+def get_ohlcv(symbol, timeframe, limit=500):
+    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    return df
 
-def get_ohlcv():
-    try:
-        ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=250)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        return df
-    except Exception as e:
-        print(f"Error fetch_ohlcv: {e}")
-        return None
-
-def calc_indicators(df):
+def calculate_indicators(df):
     # EMAs
     df['ema9'] = df['close'].ewm(span=ema9Len, adjust=False).mean()
     df['ema21'] = df['close'].ewm(span=ema21Len, adjust=False).mean()
     df['ema50'] = df['close'].ewm(span=ema50Len, adjust=False).mean()
     df['ema200'] = df['close'].ewm(span=ema200Len, adjust=False).mean()
     
-    # BB
-    df['bbMiddle'] = df['close'].rolling(bbLen).mean()
-    bb_std = df['close'].rolling(bbLen).std()
-    df['bbUpper'] = df['bbMiddle'] + bb_std * bbMult
-    df['bbLower'] = df['bbMiddle'] - bb_std * bbMult
-    
     # RSI
     delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(rsiLen).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(rsiLen).mean()
+    gain = (delta.where(delta > 0, 0)).rolling(window=rsiLen).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=rsiLen).mean()
     rs = gain / loss
     df['rsi'] = 100 - (100 / (1 + rs))
     
-    # ATR
-    high_low = df['high'] - df['low']
-    high_close = np.abs(df['high'] - df['close'].shift())
-    low_close = np.abs(df['low'] - df['close'].shift())
-    ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    true_range = np.max(ranges, axis=1)
-    df['atr'] = true_range.rolling(atrLen).mean()
+    # Bollinger Bands
+    df['bb_mid'] = df['close'].rolling(window=bbLen).mean()
+    bb_std = df['close'].rolling(window=bbLen).std()
+    df['bb_upper'] = df['bb_mid'] + (bb_std * bbMult)
+    df['bb_lower'] = df['bb_mid'] - (bb_std * bbMult)
     
     # ADX
     plus_dm = df['high'].diff()
     minus_dm = df['low'].diff()
     plus_dm[plus_dm < 0] = 0
     minus_dm[minus_dm > 0] = 0
-    tr = true_range
-    plus_di = 100 * (plus_dm.ewm(alpha=1/adxLen).mean() / tr.ewm(alpha=1/adxLen).mean())
-    minus_di = abs(100 * (minus_dm.ewm(alpha=1/adxLen).mean() / tr.ewm(alpha=1/adxLen).mean()))
+    tr1 = pd.DataFrame(df['high'] - df['low'])
+    tr2 = pd.DataFrame(abs(df['high'] - df['close'].shift(1)))
+    tr3 = pd.DataFrame(abs(df['low'] - df['close'].shift(1)))
+    frames = [tr1, tr2, tr3]
+    tr = pd.concat(frames, axis=1, join='inner').max(axis=1)
+    atr = tr.rolling(adxLen).mean()
+    plus_di = 100 * (plus_dm.ewm(alpha=1/adxLen).mean() / atr)
+    minus_di = abs(100 * (minus_dm.ewm(alpha=1/adxLen).mean() / atr))
     dx = (abs(plus_di - minus_di) / abs(plus_di + minus_di)) * 100
     df['adx'] = dx.ewm(alpha=1/adxLen).mean()
     
-    # Volumen
-    df['volAvg'] = df['volume'].rolling(20).mean()
+    # ATR
+    df['atr'] = tr.rolling(atrLen).mean()
     
-    # Pivots
-    df['pl'] = df['low'][(df['low'].shift(pivotLen) > df['low']) & (df['low'].shift(-pivotLen) > df['low'])]
-    df['ph'] = df['high'][(df['high'].shift(pivotLen) < df['high']) & (df['high'].shift(-pivotLen) < df['high'])]
+    return df
+
+def find_confirmed_pivots(df, pivotLen):
+    """
+    SOLO marca pivot cuando está 100% confirmado.
+    No repinta. Flecha aparece 10 velas después del giro real.
+    """
+    df['pivot_high'] = False
+    df['pivot_low'] = False
     
-    # Mechas
-    body = abs(df['close'] - df['open'])
-    barRange = df['high'] - df['low']
-    upperWick = df['high'] - df[['open', 'close']].max(axis=1)
-    lowerWick = df[['open', 'close']].min(axis=1) - df['low']
-    df['wickLongPct'] = np.where(barRange > 0, lowerWick / barRange * 100, 0)
-    df['wickShortPct'] = np.where(barRange > 0, upperWick / barRange * 100, 0)
+    # Recorremos dejando espacio para confirmar a ambos lados
+    for i in range(pivotLen, len(df) - pivotLen):
+        # Pivot High: máximo local confirmado
+        if df['high'].iloc[i] == df['high'].iloc[i-pivotLen:i+pivotLen+1].max():
+            df.loc[df.index[i], 'pivot_high'] = True
+            
+        # Pivot Low: mínimo local confirmado 
+        if df['low'].iloc[i] == df['low'].iloc[i-pivotLen:i+pivotLen+1].min():
+            df.loc[df.index[i], 'pivot_low'] = True
     
     return df
 
 def check_signal(df):
-    i = len(df) - 2 # PENULTIMA VELA CERRADA - así no espera 1min
-    if i < 200: return None, 0, 0
-    
-    row = df.iloc[i]
-    
-    # === FILTROS ===
-    f_rsiLong = row['rsi'] < rsiLongMax
-    f_rsiShort = row['rsi'] > rsiShortMin
-    f_bbLong = row['low'] <= row['bbLower']
-    f_bbShort = row['high'] >= row['bbUpper']
-    f_pivotLong = not pd.isna(row['pl'])
-    f_pivotShort = not pd.isna(row['ph'])
-    f_vol = row['volume'] >= row['volAvg'] * volSpike
-    f_wickLong = row['wickLongPct'] >= wickPct
-    f_wickShort = row['wickShortPct'] >= wickPct
-    f_candleLong = row['close'] > row['open']
-    f_candleShort = row['close'] < row['open']
-    
-    scoreLong = sum([f_rsiLong, f_bbLong, f_pivotLong, f_vol, f_wickLong, f_candleLong])
-    scoreShort = sum([f_rsiShort, f_bbShort, f_pivotShort, f_vol, f_wickShort, f_candleShort])
-    
-    # === LOG PARA DEBUG ===
-    print(f"Vela: {datetime.fromtimestamp(row['timestamp']/1000)} | Close: {row['close']:.5f} | L:{scoreLong}/6 S:{scoreShort}/6")
-    
-    # === ENTRA CON TRIANGULITO ===
-    if scoreLong >= 5:
-        print(f"✅ TRIANGULO VERDE L{scoreLong} DETECTADO - ENTRANDO LONG")
-        return 'long', df.iloc[-1]['close'], row['atr'] # Usa precio actual para entrar
-    if scoreShort >= 5:
-        print(f"✅ TRIANGULO ROJO S{scoreShort} DETECTADO - ENTRANDO SHORT")
-        return 'short', df.iloc[-1]['close'], row['atr']
-    
-    return None, scoreLong, scoreShort
-
-def set_leverage():
-    try:
-        exchange.set_margin_mode('isolated', SYMBOL)
-        exchange.set_leverage(LEVERAGE, SYMBOL)
-        print(f"Leverage {LEVERAGE}x seteado en {SYMBOL}")
-    except ccxt.ExchangeError as e:
-        if '110043' in str(e) or 'leverage not modified' in str(e):
-            print(f"Leverage ya estaba en {LEVERAGE}x - OK")
-        elif '110025' in str(e):
-            print(f"Error: Tenés una posición abierta. Cerrala para cambiar leverage")
-        else:
-            print(f"Leverage error: {e}")
-
-def get_position():
-    try:
-        positions = exchange.fetch_positions([SYMBOL])
-        for pos in positions:
-            if pos['symbol'] == SYMBOL and float(pos['contracts'])!= 0:
-                return pos
+    """
+    Ahora las señales solo se dan en pivots confirmados + confluencias
+    """
+    last_idx = len(df) - pivotLen - 1 # Último pivot confirmable
+    if last_idx < 0:
         return None
-    except Exception as e:
-        print(f"Error get_position: {e}")
-        return None
+        
+    row = df.iloc[last_idx]
+    
+    # FILTROS DE CONFLUENCIA
+    volume_avg = df['volume'].iloc[last_idx-20:last_idx].mean()
+    vol_condition = df['volume'].iloc[last_idx] > volume_avg * volSpike
+    
+    wick_size = df['high'].iloc[last_idx] - df['low'].iloc[last_idx]
+    upper_wick = df['high'].iloc[last_idx] - max(df['open'].iloc[last_idx], df['close'].iloc[last_idx])
+    lower_wick = min(df['open'].iloc[last_idx], df['close'].iloc[last_idx]) - df['low'].iloc[last_idx]
+    
+    trend_long = row['ema9'] > row['ema21'] > row['ema50'] > row['ema200']
+    trend_short = row['ema9'] < row['ema21'] < row['ema50'] < row['ema200']
+    
+    # LONG: Pivot Low confirmado + confluencias
+    if row['pivot_low']:
+        if (row['rsi'] < rsiLongMax and 
+            row['low'] <= row['bb_lower'] and 
+            vol_condition and 
+            lower_wick / wick_size * 100 > wickPct and
+            trend_long and 
+            row['adx'] > adxTrendMin):
+            
+            return {
+                'type': 'LONG',
+                'price': row['close'],
+                'time': row['timestamp'],
+                'level': row['low'] # La punta exacta
+            }
+    
+    # SHORT: Pivot High confirmado + confluencias 
+    if row['pivot_high']:
+        if (row['rsi'] > rsiShortMin and 
+            row['high'] >= row['bb_upper'] and 
+            vol_condition and 
+            upper_wick / wick_size * 100 > wickPct and
+            trend_short and 
+            row['adx'] > adxTrendMin):
+            
+            return {
+                'type': 'SHORT', 
+                'price': row['close'],
+                'time': row['timestamp'],
+                'level': row['high'] # La punta exacta
+            }
+    
+    return None
 
-def place_order(signal, price, atr):
-    try:
-        side = 'buy' if signal == 'long' else 'sell'
-        
-        # SL y TP por USD fijo
-        sl_distance = RISK_USD / QTY
-        tp_distance = REWARD_USD / QTY
-        
-        if signal == 'long':
-            sl_price = round(price - sl_distance, 5)
-            tp_price = round(price + tp_distance, 5)
-        else:
-            sl_price = round(price + sl_distance, 5)
-            tp_price = round(price - tp_distance, 5)
-        
-        params = {
-            'stopLoss': sl_price,
-            'takeProfit': tp_price,
-        }
-        
-        print(f"EJECUTANDO ORDEN: {side.upper()} {QTY} DOGE @ {price:.5f} | SL: {sl_price:.5f} | TP: {tp_price:.5f}")
-        
-        order = exchange.create_order(SYMBOL, 'market', side, QTY, None, params)
-        
-        msg = f"🚀 {signal.upper()} DOGE\nEntrada: {price:.5f}\nSL: {sl_price:.5f} (-${RISK_USD})\nTP: {tp_price:.5f} (+${REWARD_USD})\nQty: {QTY}"
-        print(msg)
-        send_telegram(msg)
-        return order
-        
-    except Exception as e:
-        print(f"❌ ERROR ORDEN: {e}")
-        send_telegram(f"❌ Error orden: {e}")
-        return None
+def send_telegram(msg):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
+    requests.post(url, data=data)
 
 def main():
-    print("Francotirador DOGE Bot iniciado - MODO TRIANGULITOS 75x")
-    send_telegram("🤖 Bot Francotirador DOGE iniciado - 75x - MODO TRIANGULITOS")
-    set_leverage()
+    exchange.set_leverage(LEVERAGE, SYMBOL)
+    last_signal_time = None
     
     while True:
         try:
-            pos = get_position()
-            if pos is None:
-                df = get_ohlcv()
-                if df is not None:
-                    df = calc_indicators(df)
-                    signal, scoreL, scoreS = check_signal(df)
-                    
-                    if signal:
-                        place_order(signal, df.iloc[-1]['close'], df.iloc[-2]['atr'])
-                        time.sleep(60) # Espera 1min después de entrar
-                    else:
-                        print(f"Sin señal. Score actual L:{scoreL} S:{scoreS}")
-            else:
-                print(f"Posición abierta: {pos['side']} {pos['contracts']} DOGE | PNL: {pos['unrealizedPnl']}")
+            df = get_ohlcv(SYMBOL, TIMEFRAME, 500)
+            df = calculate_indicators(df)
+            df = find_confirmed_pivots(df, pivotLen)
             
-            time.sleep(5) # Check cada 5s
+            signal = check_signal(df)
             
+            if signal and signal['time']!= last_signal_time:
+                last_signal_time = signal['time']
+                
+                if signal['type'] == 'LONG':
+                    sl_price = signal['price'] - (RISK_USD / QTY)
+                    tp_price = signal['price'] + (REWARD_USD / QTY)
+                else:
+                    sl_price = signal['price'] + (RISK_USD / QTY)
+                    tp_price = signal['price'] - (REWARD_USD / QTY)
+                
+                msg = f"🚨 {signal['type']} DOGE\nEntrada: {signal['price']:.5f}\nPunta: {signal['level']:.5f}\nSL: {sl_price:.5f}\nTP: {tp_price:.5f}\nHora: {signal['time']}"
+                send_telegram(msg)
+                print(msg)
+                
+                # Aquí va tu lógica de ejecución de órdenes
+                
         except Exception as e:
-            print(f"Error main loop: {e}")
-            time.sleep(30)
+            print(f"Error: {e}")
+            
+        time.sleep(10) # Revisa cada 10s
 
 if __name__ == "__main__":
     main()
